@@ -774,6 +774,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:0;border-radiu
 
 /* ---------- map bits ---------- */
 .leaflet-container{background:#071A23;font-family:var(--body)}
+#map.dim .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.75)}
 .leaflet-container .leaflet-bar a,.leaflet-container .leaflet-bar a:hover{background:var(--panel2);color:var(--paper);border-bottom-color:var(--rule);border-color:var(--rule)}
 .leaflet-container .leaflet-bar{border:1px solid var(--rule);box-shadow:none}
 .leaflet-control-attribution{background:rgba(8,32,43,.82)!important;color:var(--muted)!important;font-size:10px!important}
@@ -785,7 +786,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:0;border-radiu
 .fitbtn{position:absolute;z-index:800;left:12px;bottom:24px;background:var(--panel2);border:1px solid var(--rule);color:var(--paper);
   font-family:var(--display);text-transform:uppercase;letter-spacing:.12em;font-size:13px;font-weight:600;padding:7px 13px;border-radius:2px}
 .fitbtn:hover{border-color:var(--amber);color:var(--amber)}
-.offline{position:absolute;z-index:800;right:12px;top:12px;max-width:210px;background:var(--panel2);border:1px solid var(--rule);
+.offline{position:absolute;z-index:800;right:12px;top:12px;max-width:236px;background:var(--panel2);border:1px solid var(--rule);
   border-left:3px solid var(--amber);color:var(--muted);font-size:12px;line-height:1.4;padding:8px 10px;border-radius:2px;display:none}
 .offline.on{display:block}
 .mapwrap{position:relative;flex:1;min-width:0;display:flex}
@@ -822,6 +823,14 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:0;border-radiu
         <p class="eyebrow"><span class="n" id="ringcount">0</span> Rings</p>
         <div id="rings"></div>
         <button class="addbtn" id="addring">+ Add a ring</button>
+        <div class="row">
+          <span>Basemap</span>
+          <span class="seg" id="baseseg">
+            <button data-b="dark" aria-pressed="true">Dark</button>
+            <button data-b="streets" aria-pressed="false">Streets</button>
+            <button data-b="terrain" aria-pressed="false">Terrain</button>
+          </span>
+        </div>
         <div class="row">
           <span>Search among</span>
           <span class="seg" id="scopeseg">
@@ -12555,12 +12564,46 @@ let matches=[], exact=true;
 
 /* ============ map ============ */
 const map=L.map('map',{worldCopyJump:true,zoomControl:true,minZoom:1}).setView([10,20],2);
-const tiles=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-  attribution:'&copy; OpenStreetMap contributors &copy; CARTO', subdomains:'abcd', maxZoom:19
-}).addTo(map);
-let tileFails=0;
-tiles.on('tileerror',()=>{ if(++tileFails>3) document.getElementById('offline').classList.add('on'); });
-tiles.on('tileload',()=>{ document.getElementById('offline').classList.remove('on'); });
+// Basemaps that need no API key. CARTO was dropped in Sep 2026 when it began
+// requiring a key and stamping tiles with an "API KEY REQUIRED" watermark.
+const BASEMAPS=[
+  {id:'dark', label:'Dark',
+   url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+   attribution:'Esri, HERE, Garmin, &copy; OpenStreetMap contributors',
+   maxNativeZoom:16, maxZoom:19, dim:false},
+  {id:'streets', label:'Streets',
+   url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+   attribution:'&copy; OpenStreetMap contributors',
+   maxNativeZoom:19, maxZoom:19, dim:true},
+  {id:'terrain', label:'Terrain',
+   url:'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+   attribution:'&copy; OpenStreetMap contributors, SRTM | OpenTopoMap (CC-BY-SA)',
+   maxNativeZoom:16, maxZoom:19, dim:true}
+];
+let tiles=null, baseIdx=0, tileFails=0, tileOk=false, autoTried=false;
+
+function setBasemap(i,auto){
+  const b=BASEMAPS[i]; if(!b) return;
+  baseIdx=i; tileFails=0; tileOk=false;
+  if(tiles) map.removeLayer(tiles);
+  tiles=L.tileLayer(b.url,{attribution:b.attribution,maxNativeZoom:b.maxNativeZoom,maxZoom:b.maxZoom})
+        .addTo(map);
+  tiles.setZIndex(1);
+  document.getElementById('map').classList.toggle('dim', !!b.dim);
+  document.querySelectorAll('#baseseg button').forEach(x=>x.setAttribute('aria-pressed', x.dataset.b===b.id));
+  const note=document.getElementById('offline');
+  note.classList.remove('on');
+  tiles.on('tileload',()=>{ tileOk=true; note.classList.remove('on'); });
+  tiles.on('tileerror',()=>{
+    if(tileOk || ++tileFails<=4) return;
+    // one silent hop to the next basemap before blaming the connection
+    if(!autoTried && i+1<BASEMAPS.length){ autoTried=true; setBasemap(i+1,true); return; }
+    note.textContent = (navigator.onLine===false)
+      ? "No map tiles — you're offline. Rings and candidates still work."
+      : "Map tiles aren't loading. Try another basemap above — rings and candidates still work.";
+    note.classList.add('on');
+  });
+}
 const ringLayer=L.layerGroup().addTo(map);
 const hitLayer=L.layerGroup().addTo(map);
 
@@ -12810,6 +12853,14 @@ document.getElementById('popslider').oninput=e=>{
   document.getElementById('popval').textContent=fmtPop(minPop);
   recompute();
 };
+
+document.getElementById('baseseg').onclick=e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  autoTried=true;                       // an explicit choice turns off auto-switching
+  setBasemap(BASEMAPS.findIndex(x=>x.id===b.dataset.b));
+};
+setBasemap(0);
+window.addEventListener('online',()=>{ autoTried=false; setBasemap(baseIdx); });
 
 /* ============ start ============ */
 addRing(); addRing();
